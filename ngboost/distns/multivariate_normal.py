@@ -290,9 +290,14 @@ def MultivariateNormal(k):
             eta = np.squeeze(np.matmul(self.L.transpose(0, 2, 1), diff), axis=2)
             return diff, eta
 
+# In multivariate_normal.py, modify the logpdf method:
         def logpdf(self, Y):
             if HAS_NUMBA:
-                # pdf_constant is already -p/2 * log(2π)
+                # Ensure Y is a proper 2D numpy array
+                if isinstance(Y, list):
+                    Y = np.array(Y)
+                if Y.ndim == 1:
+                    Y = Y.reshape(1, -1)
                 return mvn_logpdf_numba(Y, self.loc, self.L, self.log_diag_sum, self.pdf_constant)
             else:
                 # fallback: existing NumPy path
