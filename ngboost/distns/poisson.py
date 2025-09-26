@@ -6,6 +6,22 @@ from scipy.stats import poisson as dist
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
 
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+if HAS_NUMBA:
+    import math
+
+    @njit(fastmath=True, cache=True)
+    def poisson_logpmf_numba(y, mu):
+        n = y.shape[0]
+        out = np.empty(n)
+        for i in range(n):
+            out[i] = y[i] * math.log(mu[i]) - mu[i] - math.lgamma(y[i] + 1.0)
+        return out
 
 def negative_log_likelihood(params, data):
     return -dist.logpmf(np.array(data), params[0]).sum()
@@ -52,14 +68,8 @@ class Poisson(RegressionDistn):
         ).all(), "All Poisson target data must be discrete integers"
         assert np.all([y >= 0 for y in Y]), "Count data must be >= 0"
 
-        # minimize negative log likelihood
-        m = minimize(
-            negative_log_likelihood,
-            x0=np.array([np.mean(Y)]),  # initialized value
-            args=(Y,),
-            bounds=(Bounds(0, np.max(Y))),
-        )
-        return np.array([np.log(m.x)])
+        mu_hat = np.mean(Y)
+        return np.array([np.log(mu_hat)])
 
     def sample(self, m):
         return np.array([self.dist.rvs() for i in range(m)])

@@ -11,7 +11,40 @@ import scipy as sp
 
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except Exception:
+    HAS_NUMBA = False
 
+if HAS_NUMBA:
+    @njit(fastmath=True, cache=True)
+    def mvn_logpdf_numba(Y, loc, L, log_diag_sum, pdf_const):
+        """
+        Y:   (N, p)
+        loc: (N, p)
+        L:   (N, p, p)  lower-tri, diag>0
+        log_diag_sum: (N,)
+        pdf_const: scalar
+        returns: (N,) logpdf
+        """
+        N, p = Y.shape
+        out = np.empty(N, dtype=Y.dtype)
+        for n in range(N):
+            # diff = loc - Y (shape p)
+            # eta = L^T @ diff (triangular)
+            p1 = 0.0
+            # compute eta via triangular matvec with L^T
+            # L is lower-tri, so L^T is upper-tri:
+            for i in range(p):
+                acc = 0.0
+                # (L^T)[i, j] = L[j, i], nonzero when j >= i
+                for j in range(i, p):
+                    acc += L[n, j, i] * (loc[n, j] - Y[n, j])
+                # accumulate squared value
+                p1 += acc * acc
+            out[n] = -0.5 * p1 + log_diag_sum[n] + pdf_const
+        return out
 
 def get_tril_idxs(p):
     tril_indices = np.tril_indices(p)
@@ -122,40 +155,58 @@ class MVNLogScore(LogScore):
                     VarComp[:, par_idx, par_idx2] = value
                     VarComp[:, par_idx2, par_idx] = value
         return FisherInfo
-
-
-def get_chol_factor(lower_tri_vals):
+def get_tril_factor_fast(lower_tri_vals):
     """
-
-    Args:
-        lower_tri_vals: numpy array, shaped as the number of lower triangular
-                        elements, number of observations.
-                        The values ordered according to np.tril_indices(p)
-                        where p is the dimension of the multivariate normal distn
-
-    Returns:
-        Nxpxp numpy array, with the lower triangle filled in. The diagonal is exponentiated.
-
+    lower_tri_vals: array shape (lower_size, N)
+    returns: L of shape (N, p, p) with exp on the diagonal (+1e-6)
     """
     lower_size, N = lower_tri_vals.shape
+    p = int((-1 + (1 + 8 * lower_size) ** 0.5) // 2)
 
-    # solve p(p+3)/2 = lower_size to get the
-    # number of dimensions.
+    k, l = np.tril_indices(p)
+    diag_mask = (k == l)
 
-    p = (-1 + (1 + 8 * lower_size) ** 0.5) / 2
-    p = int(p)
-
-    if not isinstance(lower_tri_vals, np.ndarray):
-        lower_tri_vals = np.array(lower_tri_vals)
-
-    L = np.zeros((N, p, p))
-    for par_ind, (k, l) in enumerate(zip(*np.tril_indices(p))):
-        if k == l:
-            # Add a small number to avoid singular matrices.
-            L[:, k, l] = np.exp(lower_tri_vals[par_ind, :]) + 1e-6
-        else:
-            L[:, k, l] = lower_tri_vals[par_ind, :]
+    # Fill
+    L = np.zeros((N, p, p), dtype=lower_tri_vals.dtype)
+    # assign all lower-tri entries in one go
+    L[:, k, l] = lower_tri_vals.T
+    # exponentiate diagonals + epsilon
+    L[:, k[diag_mask], l[diag_mask]] = np.exp(L[:, k[diag_mask], l[diag_mask]]) + 1e-6
     return L
+
+#
+# def get_chol_factor(lower_tri_vals):
+#     """
+#
+#     Args:
+#         lower_tri_vals: numpy array, shaped as the number of lower triangular
+#                         elements, number of observations.
+#                         The values ordered according to np.tril_indices(p)
+#                         where p is the dimension of the multivariate normal distn
+#
+#     Returns:
+#         Nxpxp numpy array, with the lower triangle filled in. The diagonal is exponentiated.
+#
+#     """
+#     lower_size, N = lower_tri_vals.shape
+#
+#     # solve p(p+3)/2 = lower_size to get the
+#     # number of dimensions.
+#
+#     p = (-1 + (1 + 8 * lower_size) ** 0.5) / 2
+#     p = int(p)
+#
+#     if not isinstance(lower_tri_vals, np.ndarray):
+#         lower_tri_vals = np.array(lower_tri_vals)
+#
+#     L = np.zeros((N, p, p))
+#     for par_ind, (k, l) in enumerate(zip(*np.tril_indices(p))):
+#         if k == l:
+#             # Add a small number to avoid singular matrices.
+#             L[:, k, l] = np.exp(lower_tri_vals[par_ind, :]) + 1e-6
+#         else:
+#             L[:, k, l] = lower_tri_vals[par_ind, :]
+#     return L
 
 
 def MultivariateNormal(k):
@@ -196,8 +247,8 @@ def MultivariateNormal(k):
             self.N = params.shape[1]
 
             # Number of MVN dimensions, =k originally
-            self.p = (-3 + (9 + 8 * self.n_params) ** 0.5) / 2
-            self.p = int(self.p)
+            self.p = int((-3 + (9 + 8 * self.n_params) ** 0.5) / 2)
+
 
             # Extract parameters from params list
             # Param array is assumed to of shape n_params,N
@@ -209,9 +260,10 @@ def MultivariateNormal(k):
             self.tril_L = np.array(params[self.p :, :])
 
             # Returns 3d array, shape (p, p, N)
-            self.L = get_chol_factor(self.tril_L)
+            self.L = get_tril_factor_fast(self.tril_L)
+            self.log_diag_sum = np.log(np.diagonal(self.L, axis1=1, axis2=2)).sum(axis=1)
 
-            # The remainder is just for utility.
+        # The remainder is just for utility.
             self.cov_inv = self.L @ self.L.transpose(0, 2, 1)
 
             # _cov_mat and _Lcov are place holders, relatively expensive to compute
@@ -239,15 +291,15 @@ def MultivariateNormal(k):
             return diff, eta
 
         def logpdf(self, Y):
-            _, eta = self.summaries(Y)
-            # the exponentiated part of the pdf:
-            p1 = -0.5 * np.sum(np.square(eta), axis=1)
-            p1 = p1.squeeze()
-            # this is the sqrt(determinant(Sigma)) component of the pdf
-            p2 = np.sum(np.log(np.diagonal(self.L, axis1=1, axis2=2)), axis=1)
-
-            ret = p1 + p2 + self.pdf_constant
-            return ret
+            if HAS_NUMBA:
+                # pdf_constant is already -p/2 * log(2π)
+                return mvn_logpdf_numba(Y, self.loc, self.L, self.log_diag_sum, self.pdf_constant)
+            else:
+                # fallback: existing NumPy path
+                _, eta = self.summaries(Y)
+                p1 = -0.5 * np.sum(np.square(eta), axis=1).squeeze()
+                p2 = self.log_diag_sum
+                return p1 + p2 + self.pdf_constant
 
         def fit(Y):
             N, p = Y.shape

@@ -1,23 +1,68 @@
 """The NGBoost Gamma distribution and scores"""
+
 import numpy as np
 import scipy as sp
 from scipy.stats import gamma as dist
 
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
+try:
+    from numba import njit
+    from numba import float64
+    from numba import prange
+    import math
+    from numba.special import digamma, polygamma
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
 
+
+if HAS_NUMBA:
+    @njit(fastmath=True, cache=True)
+    def gamma_logpdf_numba(y, alpha, beta, eps=1e-10):
+        """
+        Log PDF for Gamma(alpha, beta), parameterized with shape alpha and rate beta.
+        scale = 1 / beta
+        """
+        n = y.shape[0]
+        out = np.empty(n)
+        for i in range(n):
+            if y[i] <= 0.0:
+                out[i] = -np.inf
+            else:
+                out[i] = (
+                        alpha[i] * math.log(beta[i])
+                        - math.lgamma(alpha[i])
+                        + (alpha[i] - 1.0) * math.log(y[i] + eps)
+                        - beta[i] * y[i]
+                )
+        return out
+
+    @njit(fastmath=True, cache=True)
+    def gamma_dscore_numba(y, alpha, beta, eps=1e-10):
+        """
+        Derivatives of -log(PDF) wrt alpha and beta.
+        """
+        n = y.shape[0]
+        out = np.empty((n, 2))
+        for i in range(n):
+            out[i, 0] = alpha[i] * (digamma(alpha[i]) - math.log(beta[i] * y[i] + eps))
+            out[i, 1] = (beta[i] * y[i]) - alpha[i]
+        return out
 
 class GammaLogScore(LogScore):
     def score(self, Y):
+        if HAS_NUMBA:
+            return -gamma_logpdf_numba(Y, self.alpha, self.beta)
         return -self.dist.logpdf(Y)
 
     def d_score(self, Y):
+        if HAS_NUMBA:
+            return gamma_dscore_numba(Y, self.alpha, self.beta)
         D = np.zeros((len(Y), 2))
-        # d(-log(PDF))/dalpha
         D[:, 0] = self.alpha * (
-            sp.special.digamma(self.alpha) - np.log(self.eps + self.beta * Y)
+                sp.special.digamma(self.alpha) - np.log(self.eps + self.beta * Y)
         )
-        # d(-log(PDF))/dbeta
         D[:, 1] = (self.beta * Y) - self.alpha
         return D
 
@@ -48,8 +93,7 @@ class Gamma(RegressionDistn):
         return np.array([np.log(a), np.log(1 / scale)])
 
     def sample(self, m):
-        return np.array([self.rvs() for _ in range(m)])
-
+        return self.dist.rvs(size=m)
     def __getattr__(self, name):
         if name in dir(self.dist):
             return getattr(self.dist, name)

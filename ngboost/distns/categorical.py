@@ -66,7 +66,7 @@ def k_categorical(K):
             # why allow vectorized versions of the others?
             # this makes me want to refactor all the other code to use lists
             # of distributions, would be more readable imo
-
+            # agreed
         def fit(Y):
             _, n = np.unique(Y, return_counts=True)
             p = n / len(Y)

@@ -14,6 +14,7 @@ from ngboost.distns import MultivariateNormal, Normal, k_categorical
 from ngboost.learners import default_tree_learner
 from ngboost.manifold import manifold
 from ngboost.scores import LogScore
+from joblib import Parallel, delayed
 
 
 class NGBoost:
@@ -177,6 +178,7 @@ class NGBoost:
         fitted = np.array([m.predict(X) for m in models]).T
         self.base_models.append(models)
         return fitted
+
 
     # pylint: disable=too-many-positional-arguments
     def line_search(self, resids, start, Y, sample_weight=None, scale_init=1):

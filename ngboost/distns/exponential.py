@@ -1,4 +1,5 @@
 """The NGBoost Exponential distribution and scores"""
+
 import numpy as np
 import scipy as sp
 from scipy.stats import expon as dist
@@ -8,19 +9,63 @@ from ngboost.scores import CRPScore, LogScore
 
 eps = 1e-10
 
+try:
+    from numba import njit
+    import math
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+
+if HAS_NUMBA:
+    @njit(fastmath=True, cache=True)
+    def exponential_logpdf_numba(y, scale):
+        n = y.shape[0]
+        out = np.empty(n)
+        for i in range(n):
+            if y[i] < 0:
+                out[i] = -np.inf
+            else:
+                out[i] = -math.log(scale[i]) - y[i] / scale[i]
+        return out
+
+    @njit(fastmath=True, cache=True)
+    def exponential_dscore_numba(event, time, scale):
+        """
+        d(-loglik)/d log(scale)
+        event = 1 → uncensored, 0 → censored
+        """
+        n = time.shape[0]
+        out = np.empty((n, 1))
+        for i in range(n):
+            if event[i] == 1:  # uncensored
+                out[i, 0] = -( -1.0 + time[i] / scale[i] )
+            else:  # censored
+                out[i, 0] = -( time[i] / scale[i] )
+        return out
 
 class ExponentialLogScore(LogScore):
     def score(self, Y):
         E, T = Y["Event"], Y["Time"]
-        cens = (1 - E) * np.log(1 - self.dist.cdf(T) + eps)
-        uncens = E * self.dist.logpdf(T)
-        return -(cens + uncens)
+        if HAS_NUMBA:
+            # uncensored: logpdf, censored: log survival
+            logpdf_vals = exponential_logpdf_numba(T, self.scale)
+            cens = (1 - E) * np.log(1 - np.exp(-T / self.scale) + eps)
+            uncens = E * logpdf_vals
+            return -(cens + uncens)
+        else:
+            cens = (1 - E) * np.log(1 - self.dist.cdf(T) + eps)
+            uncens = E * self.dist.logpdf(T)
+            return -(cens + uncens)
 
     def d_score(self, Y):
         E, T = Y["Event"], Y["Time"]
-        cens = (1 - E) * T.squeeze() / self.scale
-        uncens = E * (-1 + T.squeeze() / self.scale)
-        return -(cens + uncens).reshape((-1, 1))
+        if HAS_NUMBA:
+            return exponential_dscore_numba(E, T, self.scale)
+        else:
+            cens = (1 - E) * T.squeeze() / self.scale
+            uncens = E * (-1 + T.squeeze() / self.scale)
+            return -(cens + uncens).reshape((-1, 1))
 
     def metric(self):
         FI = np.ones_like(self.scale)

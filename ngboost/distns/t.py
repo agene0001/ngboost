@@ -5,36 +5,88 @@ from scipy.stats import t as dist
 
 from ngboost.distns.distn import RegressionDistn
 from ngboost.scores import LogScore
+try:
+    from numba import njit
+    from numba.special import digamma as numba_digamma
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+if HAS_NUMBA:
+    import math
+
+    @njit(fastmath=True, cache=True)
+    def t_logpdf_numba_const(y, loc, scale, df_val):
+        n = y.shape[0]
+        out = np.empty(n)
+
+        c = math.lgamma((df_val + 1.0) / 2.0) - math.lgamma(df_val / 2.0)
+        log_norm = c - 0.5 * math.log(df_val * math.pi)
+
+        for i in range(n):
+            z = (y[i] - loc[i]) / scale[i]
+            out[i] = log_norm - math.log(scale[i]) - ((df_val + 1.0) / 2.0) * math.log(1.0 + (z * z) / df_val)
+
+        return out
+
+
+    # General version: supports per-sample df
+    @njit(fastmath=True, cache=True)
+    def t_logpdf_numba_elementwise(y, loc, scale, df):
+        n = y.shape[0]
+        out = np.empty(n)
+
+        for i in range(n):
+            z = (y[i] - loc[i]) / scale[i]
+            term1 = math.lgamma((df[i] + 1.0) / 2.0) - math.lgamma(df[i] / 2.0)
+            term2 = -0.5 * math.log(df[i] * math.pi) - math.log(scale[i])
+            term3 = -((df[i] + 1.0) / 2.0) * math.log(1.0 + (z * z) / df[i])
+            out[i] = term1 + term2 + term3
+
+        return out
+
 
 
 class TLogScore(LogScore):
     def score(self, Y):
-        return -self.dist.logpdf(Y)
+        if HAS_NUMBA:
+            # if df is constant across the batch, use the fast version
+            if np.all(self.df == self.df[0]):
+                return -t_logpdf_numba_const(Y, self.loc, self.scale, self.df[0])
+            else:
+                # fall back to element-wise df
+                return -t_logpdf_numba_elementwise(Y, self.loc, self.scale, self.df)
+        else:
+            return -self.dist.logpdf(Y)
 
     def _handle_loc_derivative(self, Y: np.ndarray) -> np.ndarray:
         num = (self.df + 1) * (Y - self.loc)
         den = (self.df * self.var) + (Y - self.loc) ** 2
-        return -(num / den)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return -(num / den)
 
     def _handle_scale_derivative(self, Y: np.ndarray) -> np.ndarray:
         num = (self.df + 1) * (Y - self.loc) ** 2
         den = (self.df * self.var) + (Y - self.loc) ** 2
-        return 1 - (num / den)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return 1 - (num / den)
 
     def _handle_df_derivative(self, Y: np.ndarray) -> np.ndarray:
-        term_1 = (self.df / 2) * digamma((self.df + 1) / 2)
-        term_2 = (-self.df / 2) * digamma((self.df) / 2)
-        term_3 = -1 / 2
-        term_4_1 = (-self.df / 2) * np.log(
-            1 + ((Y - self.loc) ** 2) / (self.df * self.var)
-        )
-        term_4_2_num = (self.df + 1) * (Y - self.loc) ** 2
-        term_4_2_den = (
-            2
-            * (self.df * self.var)
-            * (1 + ((Y - self.loc) ** 2) / (self.df * self.var))
-        )
-        return -(term_1 + term_2 + term_3 + term_4_1 + term_4_2_num / term_4_2_den)
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+            term_1 = (self.df / 2) * digamma((self.df + 1) / 2)
+            term_2 = (-self.df / 2) * digamma((self.df) / 2)
+            term_3 = -1 / 2
+            term_4_1 = (-self.df / 2) * np.log(
+                1 + ((Y - self.loc) ** 2) / (self.df * self.var)
+            )
+            term_4_2_num = (self.df + 1) * (Y - self.loc) ** 2
+            term_4_2_den = (
+                    2
+                    * (self.df * self.var)
+                    * (1 + ((Y - self.loc) ** 2) / (self.df * self.var))
+            )
+            result = -(term_1 + term_2 + term_3 + term_4_1 + term_4_2_num / term_4_2_den)
+        return result
 
     def d_score(self, Y):
         D = np.zeros((len(Y), 3))
@@ -61,7 +113,8 @@ class T(RegressionDistn):
         self.loc = params[0]
         self.scale = np.exp(params[1])
         self.var = self.scale**2
-        self.df = np.exp(params[2])
+        with np.errstate(over='ignore'):
+            self.df = np.exp(params[2])
         self.dist = dist(loc=self.loc, scale=self.scale, df=self.df)
 
     def fit(Y):
@@ -191,7 +244,7 @@ class TFixedDfFixedVar(RegressionDistn):
         return m
 
     def sample(self, m):
-        return np.array([self.rvs() for i in range(m)])
+        return self.dist.rvs(size=m)
 
     def __getattr__(self, name):
         return getattr(self.dist, name, None)
