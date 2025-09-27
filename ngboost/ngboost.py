@@ -5,7 +5,7 @@
 # pylint: disable=unused-variable,invalid-unary-operand-type,attribute-defined-outside-init
 # pylint: disable=redundant-keyword-arg,protected-access,unnecessary-lambda-assignment
 import numpy as np
-from sklearn.base import clone
+from sklearn.base import clone, BaseEstimator
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.utils import check_array, check_random_state, check_X_y
@@ -169,15 +169,34 @@ class NGBoost:
         )
 
     def fit_base(self, X, grads, sample_weight=None):
-        if sample_weight is None:
-            models = [clone(self.Base).fit(X, g) for g in grads.T]
-        else:
-            models = [
-                clone(self.Base).fit(X, g, sample_weight=sample_weight) for g in grads.T
-            ]
+        models = []
+        for g in grads.T:
+            # Case 1: Base is already an estimator instance
+            if isinstance(self.Base, BaseEstimator):
+                try:
+                    base = clone(self.Base)  # works for sklearn-cloneable things
+                except Exception:
+                    # fallback: just reuse class constructor with stored params
+                    base = self.Base.__class__(**self.Base.get_params())
+            # Case 2: Base is a class or factory
+            elif callable(self.Base):
+                base = self.Base()
+            else:
+                raise ValueError(f"Unsupported Base type: {type(self.Base)}")
+
+            # train
+            if sample_weight is None:
+                base.fit(X, g)
+            else:
+                base.fit(X, g, sample_weight=sample_weight)
+
+            models.append(base)
+
+        # Store predictions
         fitted = np.array([m.predict(X) for m in models]).T
         self.base_models.append(models)
         return fitted
+
 
 
     # pylint: disable=too-many-positional-arguments
