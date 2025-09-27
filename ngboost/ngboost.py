@@ -168,34 +168,39 @@ class NGBoost:
             params[idxs, :],
         )
 
+
     def fit_base(self, X, grads, sample_weight=None):
         models = []
         for g in grads.T:
-            # Case 1: Base is already an estimator instance
             if isinstance(self.Base, BaseEstimator):
                 try:
-                    base = clone(self.Base)  # works for sklearn-cloneable things
+                    # First try sklearn clone
+                    base = clone(self.Base)
                 except Exception:
-                    # fallback: just reuse class constructor with stored params
-                    base = self.Base.__class__(**self.Base.get_params())
-            # Case 2: Base is a class or factory
+                    # Fallback: manually rebuild with only safe params
+                    if hasattr(self.Base, "get_params"):
+                        params = self.Base.get_params(deep=False)
+                        sig = self.Base.__class__.__init__.__code__.co_varnames
+                        safe_params = {k: v for k, v in params.items() if k in sig}
+                        base = self.Base.__class__(**safe_params)
+                    else:
+                        base = self.Base.__class__()
             elif callable(self.Base):
-                base = self.Base()
+                base = self.Base()  # If it’s just a class or factory
             else:
                 raise ValueError(f"Unsupported Base type: {type(self.Base)}")
 
-            # train
+            # Fit
             if sample_weight is None:
                 base.fit(X, g)
             else:
                 base.fit(X, g, sample_weight=sample_weight)
-
             models.append(base)
 
-        # Store predictions
         fitted = np.array([m.predict(X) for m in models]).T
         self.base_models.append(models)
         return fitted
+
 
 
 
