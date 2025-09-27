@@ -169,15 +169,29 @@ class NGBoost:
         )
 
     def fit_base(self, X, grads, sample_weight=None):
-        if sample_weight is None:
-            models = [clone(self.Base).fit(X, g) for g in grads.T]
-        else:
-            models = [
-                clone(self.Base).fit(X, g, sample_weight=sample_weight) for g in grads.T
-            ]
+        models = []
+        for g in grads.T:
+            if hasattr(self.Base, "fit") and hasattr(self.Base, "predict"):
+                # Case 1: Base is already an estimator instance (like your NeuralBaseLearner)
+                base = clone(self.Base) if hasattr(self.Base, "get_params") else self.Base.__class__(**self.Base.get_params())
+                if sample_weight is None:
+                    base.fit(X, g)
+                else:
+                    base.fit(X, g, sample_weight=sample_weight)
+                models.append(base)
+            else:
+                # Case 2: Base is a class or factory function (default trees)
+                base = clone(self.Base)
+                if sample_weight is None:
+                    base.fit(X, g)
+                else:
+                    base.fit(X, g, sample_weight=sample_weight)
+                models.append(base)
+
         fitted = np.array([m.predict(X) for m in models]).T
         self.base_models.append(models)
         return fitted
+
 
 
     # pylint: disable=too-many-positional-arguments
